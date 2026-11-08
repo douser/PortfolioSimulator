@@ -24,16 +24,26 @@ st.set_page_config(
 DATA_FILE = "portfolios_data.json"
 
 # -----------------------------------------------------------------------------
-# 웹페이지(브라우저) 종료 감지 시 백그라운드 cmd/서버 자동 종료 감시자
+# 클라우드 배포 환경 감지 (Streamlit Cloud vs 로컬 PC)
 # -----------------------------------------------------------------------------
-if "server_watcher_started" not in st.session_state:
+# Streamlit Cloud 배포 환경에서는 서버가 항시 켜져 있어야 하므로 os._exit(0)을 실행하면 안 됨
+IS_CLOUD_ENV = (
+    os.environ.get("STREAMLIT_SHARING_HOST") is not None
+    or os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true"
+    or "STREAMLIT_RUNTIME_ENV" in os.environ
+    or os.path.exists("/mount")
+    or os.path.exists("/home/appuser")
+)
+
+# 로컬 PC 환경일 때만 브라우저 닫힘 감지 스레드 가동
+if not IS_CLOUD_ENV and "server_watcher_started" not in st.session_state:
     st.session_state.server_watcher_started = True
 
     def auto_close_on_browser_exit():
-        time.sleep(6)
+        time.sleep(10)
         has_connected = False
         while True:
-            time.sleep(2)
+            time.sleep(3)
             try:
                 from streamlit.runtime import Runtime
                 runtime = Runtime.instance()
@@ -190,7 +200,7 @@ def save_to_disk(portfolios: dict, settings: dict, filepath: str = DATA_FILE):
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
     except Exception as e:
-        st.warning(f"로컬 파일 저장 중 오류 발생: {e}")
+        pass
 
 
 def load_from_disk(filepath: str = DATA_FILE) -> tuple:
@@ -227,7 +237,6 @@ if "portfolios" not in st.session_state or "portfolio_settings" not in st.sessio
         }
         save_to_disk(st.session_state.portfolios, st.session_state.portfolio_settings)
 
-# 기본 포트폴리오의 초기 기본 모드를 확실하게 모드 1로 보장
 if "initialized_default_mode" not in st.session_state:
     st.session_state.initialized_default_mode = True
     if "기본 포트폴리오" in st.session_state.portfolio_settings:
@@ -338,13 +347,6 @@ def resolve_shares_and_price(
 # 3가지 모드 지원 손절/익절 시뮬레이션 핵심 계산 로직
 # -----------------------------------------------------------------------------
 def simulate_position(item: dict, settings: dict):
-    """
-    모드 1, 2, 3 지원 포지션 시뮬레이션:
-    - 공통 손절선: 매수가 대비 손절선(예: -5%) 이하 시 손절 종료
-    - 모드 1 (단일 익절): 익절선(예: +15%) 도달 시 즉시 전량 매도 종료
-    - 모드 2 (최고가 추적 트레일링): 익절선 도달 후 기록한 장중 최고가 대비 지정 비율(-5%) 하락 시 매도
-    - 모드 3 (직전 목표가 기준 방어선 상향): 익절선 도달 시 직전 목표가 대비 -5%로 매도가 상향, 미도달 시 계속 보유
-    """
     ticker = str(item["ticker"]).strip().upper()
     buy_date = item["buy_date"]
     if isinstance(buy_date, str):
@@ -449,7 +451,6 @@ def simulate_position(item: dict, settings: dict):
             c_return = ((c_price - buy_price) / buy_price) * 100
             cur_date = row["Date"]
 
-            # [1단계] 1차 익절 목표 도달 전
             if not hit_tp1:
                 if c_return <= stop_loss_pct:
                     status = "손절"
@@ -475,7 +476,6 @@ def simulate_position(item: dict, settings: dict):
                         m3_next_target = m3_last_target * (1 + m3_step_up / 100)
                     continue
 
-            # [2단계 이상] 모드 2 또는 모드 3의 1차 목표 달성 이후 추적
             else:
                 if "모드 2" in exit_mode:
                     if c_price > highest_price_after_tp1:
@@ -574,7 +574,7 @@ with st.sidebar.expander("➕ 새 포트폴리오 만들기"):
 st.sidebar.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 사이드바: 2. 종목 추가 (패널 위치 상단으로 이동!)
+# 사이드바: 2. 종목 추가 (상단 배치)
 # -----------------------------------------------------------------------------
 st.sidebar.subheader(f"➕ [{st.session_state.current_portfolio_name}] 종목 추가")
 
@@ -649,7 +649,7 @@ with st.sidebar.form(key="add_stock_form", clear_on_submit=True):
 st.sidebar.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 사이드바: 3. 실시간 익절 전략 모드 및 시뮬레이션 설정 (패널 위치 하단으로 이동!)
+# 사이드바: 3. 실시간 익절 전략 모드 및 시뮬레이션 설정 (하단 배치)
 # -----------------------------------------------------------------------------
 st.sidebar.subheader(f"⚙️ [{st.session_state.current_portfolio_name}] 전략 설정")
 
@@ -659,7 +659,6 @@ if curr_p_name not in st.session_state.portfolio_settings:
 
 cur_settings = st.session_state.portfolio_settings[curr_p_name]
 
-# 공통 손절 / 익절선 입력
 col_sl, col_tp = st.sidebar.columns(2)
 with col_sl:
     new_sl = st.number_input(
@@ -678,7 +677,6 @@ with col_tp:
         key=f"tp_input_{curr_p_name}"
     )
 
-# 익절 전략 모드 옵션 (기본값: 모드 1)
 mode_options = [
     "모드 1: 목표가 도달 시 즉시 익절",
     "모드 2: 최고가 추적 트레일링",
@@ -733,13 +731,11 @@ elif "모드 3" in selected_mode:
         key=f"m3_up_input_{curr_p_name}"
     )
 
-# 기본 전략 초기화 버튼
 if st.sidebar.button("🔄 기본 전략(모드 1)으로 초기화", key=f"reset_settings_{curr_p_name}"):
     st.session_state.portfolio_settings[curr_p_name] = DEFAULT_SETTINGS.copy()
     save_to_disk(st.session_state.portfolios, st.session_state.portfolio_settings)
     st.rerun()
 
-# 설정값 업데이트 및 자동 저장
 updated_settings = {
     "stop_loss_pct": new_sl,
     "take_profit_pct": new_tp,
@@ -760,10 +756,12 @@ if st.sidebar.button("🗑️ 현재 포트폴리오 종목 전체 비우기"):
     save_to_disk(st.session_state.portfolios, st.session_state.portfolio_settings)
     st.rerun()
 
-if st.sidebar.button("🛑 프로그램 및 서버 완전 종료", help="웹 서버와 백그라운드 cmd 창을 즉시 종료합니다.", type="secondary"):
-    st.sidebar.warning("프로그램과 서버 프로세스를 종료합니다. 잠시 후 창을 닫아주세요.")
-    time.sleep(1)
-    os._exit(0)
+# 로컬 PC 환경에서만 프로세스 완전 종료 버튼 노출 (클라우드에서는 서버 보호를 위해 숨김)
+if not IS_CLOUD_ENV:
+    if st.sidebar.button("🛑 프로그램 및 서버 완전 종료", help="웹 서버와 백그라운드 cmd 창을 즉시 종료합니다.", type="secondary"):
+        st.sidebar.warning("프로그램과 서버 프로세스를 종료합니다. 잠시 후 창을 닫아주세요.")
+        time.sleep(1)
+        os._exit(0)
 
 
 # -----------------------------------------------------------------------------
